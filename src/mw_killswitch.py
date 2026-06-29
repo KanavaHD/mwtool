@@ -4,6 +4,7 @@ import tkinter as tk
 import subprocess
 import ctypes
 import threading
+import math
 
 hosts = r"C:\Windows\System32\drivers\etc\hosts"
 line = "127.0.0.1 www.motivewave.com"
@@ -87,14 +88,47 @@ class App(tk.Tk):
             self.btn.config(text="RESTORE CONNECTION", bg="#1a1a1a", state=tk.NORMAL)
             self.desc_var.set("MotiveWave heartbeat is currently blocked.\nThe license is released for your home PC.")
             
-            # White glowing dot
-            self.canvas.create_oval(50, 10, 70, 30, outline="#333333", width=2) # Outer ring
-            self.canvas.create_oval(55, 15, 65, 25, fill="#ffffff", outline="") # Glowing core
-            self.canvas.create_text(125, 20, text="LICENSE FREE", fill="#ffffff", font=("Segoe UI", 10, "bold"))
+            self.glow_step = 0
+            self.animate_glow()
         else:
             self.status_var.set("STATUS: ACTIVE")
             self.btn.config(text="DROP CONNECTION", bg="#1a1a1a", state=tk.NORMAL)
             self.desc_var.set("MotiveWave heartbeat is active.\nDrop connection to free up the license.")
+            
+    def animate_glow(self):
+        if not self.check() or self.is_loading:
+            return
+            
+        self.canvas.delete("glow")
+        
+        # Smooth appearance: scale up over 15 frames
+        scale = min(1.0, self.glow_step / 15.0)
+        
+        # Continuous subtle pulse after appearing
+        if scale >= 1.0:
+            pulse = math.sin((self.glow_step - 15) * 0.1) * 0.15 + 0.85
+        else:
+            pulse = scale
+
+        cx, cy = 60, 20
+        
+        # Layered circles to create a true gradient glow effect
+        colors = ["#1a1a1a", "#222222", "#333333", "#555555", "#aaaaaa", "#ffffff"]
+        max_r = 14 * pulse
+        
+        for i, color in enumerate(colors):
+            r = max_r * (1 - i/len(colors))
+            if r > 0:
+                self.canvas.create_oval(cx - r, cy - r, cx + r, cy + r, fill=color, outline="", tags="glow")
+                
+        # Fade text in smoothly
+        if scale > 0.3:
+            c_val = int(255 * min(1.0, (scale - 0.3) * 1.5))
+            hex_c = f"#{c_val:02x}{c_val:02x}{c_val:02x}"
+            self.canvas.create_text(110, 20, text="LICENSE FREE", fill=hex_c, font=("Segoe UI", 8, "bold"), tags="glow")
+            
+        self.glow_step += 1
+        self.after(30, self.animate_glow)
             
     def start_toggle(self):
         if self.is_loading: return
