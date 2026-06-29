@@ -205,48 +205,6 @@ class App(tk.Tk):
         else:
             self.log_msg("[WARNING] MotiveWave startup.ini not found. Proxy might not be picked up.")
 
-        # Write capture_addon.py
-        addon_path = os.path.join(app_dir, "capture_addon.py")
-        addon_code = f"""
-import urllib.parse
-import json
-import os
-from mitmproxy import http
-
-class CaptureRelease:
-    def request(self, flow: http.HTTPFlow):
-        if "/license/release.do" in flow.request.path or "/license/validate.do" in flow.request.path or "/license/update_service.do" in flow.request.path:
-            body = flow.request.get_text()
-            params = urllib.parse.parse_qs(body)
-            profile_id = params.get("profile_id", [""])[0]
-            machine_id = params.get("machine_id", [""])[0]
-            build = params.get("build", ["640"])[0]
-            version = params.get("version", ["7.0.26"])[0]
-            
-            if profile_id and machine_id:
-                config = {{
-                    "profile_id": profile_id,
-                    "machine_id": machine_id,
-                    "build": build,
-                    "version": version
-                }}
-                config_path = r"{config_path}"
-                with open(config_path, "w") as f:
-                    json.dump(config, f, indent=4)
-                
-                import sys
-                sys.exit(0)
-
-addons = [CaptureRelease()]
-"""
-        try:
-            with open(addon_path, "w") as f:
-                f.write(addon_code.strip())
-        except Exception as e:
-            self.log_msg(f"[ERROR] Failed to write setup helper: {e}")
-            self.restore_startup_ini()
-            return
-            
         self.log_msg("[SETUP] Starting mitmdump backend...")
         
         # Determine mitmdump path
@@ -257,7 +215,7 @@ addons = [CaptureRelease()]
             mitmdump_exe = os.path.join(local_bin, "mitmdump.exe")
             if not os.path.exists(mitmdump_exe):
                 self.log_msg("[SETUP] Downloading mitmproxy backend...")
-                self.btn.config(text="DOWNLOADING BACKEND...", state=tk.DISABLED)
+                self.after(0, lambda: self.btn.config(text="DOWNLOADING BACKEND...", state=tk.DISABLED))
                 try:
                     os.makedirs(local_bin, exist_ok=True)
                     import urllib.request
@@ -270,11 +228,17 @@ addons = [CaptureRelease()]
                         if total_size > 0:
                             percent = min(1.0, (count * block_size) / total_size)
                             self.prog_var.set(percent)
-                            self.prog_bar.coords(self.prog_rect, 0, 0, self.winfo_width() * percent, 4)
-                            self.update_idletasks()
+                            try:
+                                self.prog_bar.coords(self.prog_rect, 0, 0, self.winfo_width() * percent, 4)
+                                self.update_idletasks()
+                            except:
+                                pass
 
                     urllib.request.urlretrieve(zip_url, zip_path, reporthook=report_hook)
-                    self.prog_bar.coords(self.prog_rect, 0, 0, self.winfo_width(), 4)
+                    try:
+                        self.prog_bar.coords(self.prog_rect, 0, 0, self.winfo_width(), 4)
+                    except:
+                        pass
                     self.log_msg("[SETUP] Extracting mitmproxy...")
                     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                         zip_ref.extractall(local_bin)
@@ -289,9 +253,13 @@ addons = [CaptureRelease()]
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = subprocess.SW_HIDE
+            # No addon script — just run mitmdump with verbose flow detail
+            # and parse its stdout for the license credentials
             self.mitm_proc = subprocess.Popen(
-                [mitmdump_exe, "-p", "8080", "-s", addon_path, "--ssl-insecure"],
+                [mitmdump_exe, "-p", "8080", "--ssl-insecure", "--set", "flow_detail=4"],
                 startupinfo=startupinfo,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 cwd=app_dir
             )
             
@@ -302,14 +270,15 @@ addons = [CaptureRelease()]
                 for _ in range(15):
                     if os.path.exists(cert_path):
                         subprocess.run(["certutil", "-addstore", "root", cert_path], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                        self.log_msg("[SETUP] SSL certificate installed.")
                         break
                     time.sleep(1)
             threading.Thread(target=trust_cert, daemon=True).start()
 
             self.log_msg("[SETUP] Proxy running. PLEASE START MOTIVEWAVE, THEN CLOSE IT.")
-            self.btn.config(text="WAITING FOR CAPTURE...", state=tk.DISABLED)
+            self.after(0, lambda: self.btn.config(text="WAITING FOR CAPTURE...", state=tk.DISABLED))
             
-            threading.Thread(target=self.monitor_setup, args=(addon_path,), daemon=True).start()
+            threading.Thread(target=self.monitor_setup_stdout, daemon=True).start()
             
         except Exception as e:
             self.log_msg(f"[ERROR] Could not start mitmdump: {e}")
@@ -329,17 +298,111 @@ addons = [CaptureRelease()]
             except Exception as e:
                 pass
 
-    def monitor_setup(self, addon_path):
+    def monitor_setup_stdout(self):
+        """Read mitmdump stdout line-by-line and look for license credentials."""
         import time
-        while True:
-            if os.path.exists(config_path):
-                self.log_msg("[SETUP] Configuration captured successfully!")
-                break
-            # Check if process died
+        import re
+        import urllib.parse
+        
+        captured_profile = None
+        captured_machine = None
+        captured_build = "640"
+        captured_version = "7.0.26"
+        buffer = ""
+        
+        try:
+            while self.mitm_proc and self.mitm_proc.poll() is None:
+                line = self.mitm_proc.stdout.readline()
+                if not line:
+                    break
+                try:
+                    text = line.decode("utf-8", errors="replace").strip()
+                except:
+                    continue
+                
+                buffer += text + "\n"
+                
+                # Look for profile_id and machine_id in the output
+                # mitmdump with flow_detail=4 dumps full request bodies
+                if "profile_id" in text or "machine_id" in text:
+                    # Try to parse URL-encoded form data
+                    # The body line might look like: profile_id=xxx&machine_id=yyy&build=640&version=7.0.26
+                    try:
+                        params = urllib.parse.parse_qs(text)
+                        if "profile_id" in params:
+                            captured_profile = params["profile_id"][0]
+                        if "machine_id" in params:
+                            captured_machine = params["machine_id"][0]
+                        if "build" in params:
+                            captured_build = params["build"][0]
+                        if "version" in params:
+                            captured_version = params["version"][0]
+                    except:
+                        pass
+                    
+                    # Also try regex extraction for partial matches
+                    if not captured_profile:
+                        m = re.search(r'profile_id=([^&\s]+)', text)
+                        if m:
+                            captured_profile = urllib.parse.unquote(m.group(1))
+                    if not captured_machine:
+                        m = re.search(r'machine_id=([^&\s]+)', text)
+                        if m:
+                            captured_machine = urllib.parse.unquote(m.group(1))
+                    
+                    if captured_profile and captured_machine:
+                        self.log_msg(f"[SETUP] Captured credentials!")
+                        cfg = {
+                            "profile_id": captured_profile,
+                            "machine_id": captured_machine,
+                            "build": captured_build,
+                            "version": captured_version
+                        }
+                        with open(config_path, "w") as f:
+                            json.dump(cfg, f, indent=4)
+                        break
+                        
+                # Also check the buffer for multi-line bodies
+                if "profile_id" in buffer and "machine_id" in buffer:
+                    for bline in buffer.split("\n"):
+                        if "profile_id" in bline and "machine_id" in bline:
+                            try:
+                                params = urllib.parse.parse_qs(bline.strip())
+                                p = params.get("profile_id", [None])[0]
+                                m_val = params.get("machine_id", [None])[0]
+                                if p and m_val:
+                                    captured_profile = p
+                                    captured_machine = m_val
+                                    captured_build = params.get("build", ["640"])[0]
+                                    captured_version = params.get("version", ["7.0.26"])[0]
+                                    self.log_msg(f"[SETUP] Captured credentials!")
+                                    cfg = {
+                                        "profile_id": captured_profile,
+                                        "machine_id": captured_machine,
+                                        "build": captured_build,
+                                        "version": captured_version
+                                    }
+                                    with open(config_path, "w") as f:
+                                        json.dump(cfg, f, indent=4)
+                            except:
+                                pass
+                    if captured_profile and captured_machine:
+                        break
+                        
+        except Exception as e:
+            self.log_msg(f"[ERROR] Monitor error: {e}")
+        
+        # If process died and we didn't capture, show stderr
+        if not (captured_profile and captured_machine):
+            if self.mitm_proc:
+                try:
+                    stderr_out = self.mitm_proc.stderr.read().decode("utf-8", errors="replace")
+                    if stderr_out.strip():
+                        self.log_msg(f"[DEBUG] mitmdump stderr: {stderr_out[:300]}")
+                except:
+                    pass
             if self.mitm_proc and self.mitm_proc.poll() is not None:
-                self.log_msg("[ERROR] Proxy process terminated unexpectedly.")
-                break
-            time.sleep(0.5)
+                self.log_msg("[ERROR] Proxy process terminated. Check firewall settings.")
             
         # Cleanup
         if self.mitm_proc:
@@ -350,12 +413,6 @@ addons = [CaptureRelease()]
             self.mitm_proc = None
             
         self.restore_startup_ini()
-        
-        try:
-            if os.path.exists(addon_path):
-                os.remove(addon_path)
-        except:
-            pass
             
         if self.load_config():
             self.after(0, self.update_ui)
