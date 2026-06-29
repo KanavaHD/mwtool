@@ -348,6 +348,8 @@ class App(tk.Tk):
                 # Tell client the tunnel is established
                 client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 
+                self.log_msg(f"[DEBUG] CONNECT requested for: {host}:{port}")
+                
                 if "motivewave" in host.lower():
                     self._mitm_connection(client_sock, host, port, mitm_ctx)
                 else:
