@@ -76,7 +76,7 @@ close_btn = tk.Button(top, text="✕", bg="#0a0a0a", fg="#666666", bd=0,
                       command=root.destroy, font=("Arial", 12))
 close_btn.pack(side="right", padx=10)
 
-title_lbl = tk.Label(top, text="MW Session Blocker", bg="#0a0a0a", fg="#444444", font=("Arial", 8))
+title_lbl = tk.Label(top, text="GhostWave", bg="#0a0a0a", fg="#444444", font=("Arial", 8))
 title_lbl.pack(side="left", padx=12, pady=5)
 title_lbl.bind("<Button-1>", get_pos)
 title_lbl.bind("<B1-Motion>", move_app)
