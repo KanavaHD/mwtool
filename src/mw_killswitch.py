@@ -277,7 +277,7 @@ addons = [CaptureRelease()]
                     self.prog_bar.coords(self.prog_rect, 0, 0, self.winfo_width(), 4)
                     self.log_msg("[SETUP] Extracting mitmproxy...")
                     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                        zip_ref.extract("mitmdump.exe", local_bin)
+                        zip_ref.extractall(local_bin)
                     os.remove(zip_path)
                     self.log_msg("[SETUP] mitmproxy ready.")
                 except Exception as e:
@@ -298,8 +298,8 @@ addons = [CaptureRelease()]
             # Trust the mitmproxy certificate automatically
             def trust_cert():
                 import time
-                cert_path = os.path.expanduser(r"~\.mitmproxy\mitmproxy-ca-cert.cer")
-                for _ in range(10):
+                cert_path = os.path.join(os.path.expanduser("~"), ".mitmproxy", "mitmproxy-ca-cert.cer")
+                for _ in range(15):
                     if os.path.exists(cert_path):
                         subprocess.run(["certutil", "-addstore", "root", cert_path], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
                         break
