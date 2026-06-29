@@ -253,13 +253,13 @@ class App(tk.Tk):
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = subprocess.SW_HIDE
-            # No addon script — just run mitmdump with verbose flow detail
-            # and parse its stdout for the license credentials
+            # Run mitmdump with verbose flow detail, merge stderr into stdout
+            # so we can read ALL output from one pipe
             self.mitm_proc = subprocess.Popen(
                 [mitmdump_exe, "-p", "8080", "--ssl-insecure", "--set", "flow_detail=4"],
                 startupinfo=startupinfo,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 cwd=app_dir
             )
             
@@ -267,7 +267,7 @@ class App(tk.Tk):
             def trust_cert():
                 import time
                 cert_path = os.path.join(os.path.expanduser("~"), ".mitmproxy", "mitmproxy-ca-cert.cer")
-                for _ in range(15):
+                for _ in range(20):
                     if os.path.exists(cert_path):
                         subprocess.run(["certutil", "-addstore", "root", cert_path], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
                         self.log_msg("[SETUP] SSL certificate installed.")
@@ -299,7 +299,7 @@ class App(tk.Tk):
                 pass
 
     def monitor_setup_stdout(self):
-        """Read mitmdump stdout line-by-line and look for license credentials."""
+        """Read mitmdump output and look for license credentials."""
         import time
         import re
         import urllib.parse
@@ -308,25 +308,49 @@ class App(tk.Tk):
         captured_machine = None
         captured_build = "640"
         captured_version = "7.0.26"
-        buffer = ""
         
         try:
-            while self.mitm_proc and self.mitm_proc.poll() is None:
+            while self.mitm_proc:
+                # Check if process died
+                if self.mitm_proc.poll() is not None:
+                    # Read any remaining output
+                    try:
+                        remaining = self.mitm_proc.stdout.read()
+                        if remaining:
+                            text = remaining.decode("utf-8", errors="replace")
+                            self.log_msg(f"[DEBUG] mitmdump output: {text[:500]}")
+                    except:
+                        pass
+                    self.log_msg("[ERROR] Proxy process exited. Restarting may be needed.")
+                    break
+                
                 line = self.mitm_proc.stdout.readline()
                 if not line:
-                    break
+                    # Empty read but process alive — just wait a bit
+                    time.sleep(0.1)
+                    continue
+                    
                 try:
                     text = line.decode("utf-8", errors="replace").strip()
                 except:
                     continue
                 
-                buffer += text + "\n"
+                if not text:
+                    continue
                 
                 # Look for profile_id and machine_id in the output
-                # mitmdump with flow_detail=4 dumps full request bodies
                 if "profile_id" in text or "machine_id" in text:
-                    # Try to parse URL-encoded form data
-                    # The body line might look like: profile_id=xxx&machine_id=yyy&build=640&version=7.0.26
+                    # Try regex extraction
+                    if not captured_profile:
+                        m = re.search(r'profile_id=([^&\s]+)', text)
+                        if m:
+                            captured_profile = urllib.parse.unquote(m.group(1))
+                    if not captured_machine:
+                        m = re.search(r'machine_id=([^&\s]+)', text)
+                        if m:
+                            captured_machine = urllib.parse.unquote(m.group(1))
+                    
+                    # Also try URL-encoded form data parsing
                     try:
                         params = urllib.parse.parse_qs(text)
                         if "profile_id" in params:
@@ -340,18 +364,8 @@ class App(tk.Tk):
                     except:
                         pass
                     
-                    # Also try regex extraction for partial matches
-                    if not captured_profile:
-                        m = re.search(r'profile_id=([^&\s]+)', text)
-                        if m:
-                            captured_profile = urllib.parse.unquote(m.group(1))
-                    if not captured_machine:
-                        m = re.search(r'machine_id=([^&\s]+)', text)
-                        if m:
-                            captured_machine = urllib.parse.unquote(m.group(1))
-                    
                     if captured_profile and captured_machine:
-                        self.log_msg(f"[SETUP] Captured credentials!")
+                        self.log_msg("[SETUP] Captured credentials!")
                         cfg = {
                             "profile_id": captured_profile,
                             "machine_id": captured_machine,
@@ -362,47 +376,8 @@ class App(tk.Tk):
                             json.dump(cfg, f, indent=4)
                         break
                         
-                # Also check the buffer for multi-line bodies
-                if "profile_id" in buffer and "machine_id" in buffer:
-                    for bline in buffer.split("\n"):
-                        if "profile_id" in bline and "machine_id" in bline:
-                            try:
-                                params = urllib.parse.parse_qs(bline.strip())
-                                p = params.get("profile_id", [None])[0]
-                                m_val = params.get("machine_id", [None])[0]
-                                if p and m_val:
-                                    captured_profile = p
-                                    captured_machine = m_val
-                                    captured_build = params.get("build", ["640"])[0]
-                                    captured_version = params.get("version", ["7.0.26"])[0]
-                                    self.log_msg(f"[SETUP] Captured credentials!")
-                                    cfg = {
-                                        "profile_id": captured_profile,
-                                        "machine_id": captured_machine,
-                                        "build": captured_build,
-                                        "version": captured_version
-                                    }
-                                    with open(config_path, "w") as f:
-                                        json.dump(cfg, f, indent=4)
-                            except:
-                                pass
-                    if captured_profile and captured_machine:
-                        break
-                        
         except Exception as e:
             self.log_msg(f"[ERROR] Monitor error: {e}")
-        
-        # If process died and we didn't capture, show stderr
-        if not (captured_profile and captured_machine):
-            if self.mitm_proc:
-                try:
-                    stderr_out = self.mitm_proc.stderr.read().decode("utf-8", errors="replace")
-                    if stderr_out.strip():
-                        self.log_msg(f"[DEBUG] mitmdump stderr: {stderr_out[:300]}")
-                except:
-                    pass
-            if self.mitm_proc and self.mitm_proc.poll() is not None:
-                self.log_msg("[ERROR] Proxy process terminated. Check firewall settings.")
             
         # Cleanup
         if self.mitm_proc:
@@ -411,7 +386,8 @@ class App(tk.Tk):
             except:
                 pass
             self.mitm_proc = None
-            
+        
+        # Only restore startup.ini AFTER we captured, or if process died
         self.restore_startup_ini()
             
         if self.load_config():
